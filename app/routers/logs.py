@@ -1,217 +1,298 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request, status
-from fastapi.responses import HTMLResponse
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session, joinedload
 
-from app.auth import require_editor
+from app.auth import require_user, require_editor
 from app.database import get_db
-from app.models.ferment import Batch, Ferment
-from app.models.log import BatchLog
-from app.models.lookup import Status, SmellDescriptor, VisualDescriptor
+from app.models.schedule import Schedule, ScheduleEvent
+from app.models.ferment import Ferment, Batch, Container
+from app.models.tool import Tool
 from app.models.user import User
+from app.templates import templates
 
-router = APIRouter(prefix="/ferments/{ferment_id}/batches/{batch_id}/logs")
+router = APIRouter(prefix="/schedules")
+
+TARGET_TYPES = ["ferment", "batch", "container", "tool"]
 
 
-@router.post("/add")
-def log_add(
-    ferment_id: int,
-    batch_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_editor),
-    logged_at: Optional[str] = Form(None),
-    status_id: Optional[str] = Form(None),
-    ph: Optional[float] = Form(None),
-    temperature: Optional[float] = Form(None),
-    smell_ids: list[int] = Form(default=[]),
-    smell_notes: Optional[str] = Form(None),
-    visual_ids: list[int] = Form(default=[]),
-    visual_notes: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
-):
-    batch = db.query(Batch).filter(
-        Batch.id == batch_id, Batch.ferment_id == ferment_id
-    ).first()
-    if not batch:
-        return RedirectResponse(f"/ferments/{ferment_id}", status_code=status.HTTP_302_FOUND)
+def _now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    def parse_dt(val):
-        if not val:
-            return datetime.now(timezone.utc).replace(tzinfo=None)
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(val, fmt)
-            except ValueError:
-                continue
-        return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # Convert status_id from form string to int (empty string → None)
-    sid = None
-    if status_id and status_id.strip():
+def _parse_dt(val: Optional[str]) -> Optional[datetime]:
+    if not val:
+        return None
+    # Handle all formats including Flatpickr's "Y-m-d H:i" output
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
-            sid = int(status_id)
+            return datetime.strptime(val.strip(), fmt)
         except ValueError:
-            sid = None
-
-    smells  = db.query(SmellDescriptor).filter(SmellDescriptor.id.in_(smell_ids)).all() if smell_ids else []
-    visuals = db.query(VisualDescriptor).filter(VisualDescriptor.id.in_(visual_ids)).all() if visual_ids else []
-
-    entry = BatchLog(
-        batch_id=batch_id,
-        logged_at=parse_dt(logged_at),
-        logged_by_id=current_user.id,
-        status_id=sid,
-        ph=ph,
-        temperature=temperature,
-        smell_notes=smell_notes or None,
-        visual_notes=visual_notes or None,
-        notes=notes or None,
-    )
-    entry.smell_descriptors  = smells
-    entry.visual_descriptors = visuals
-    db.add(entry)
-
-    # If status changed, update both batch and ferment status
-    if sid:
-        batch.status_id = sid
-        ferment = db.query(Ferment).filter_by(id=ferment_id).first()
-        if ferment:
-            ferment.status_id = sid
-
-    db.commit()
-
-    return RedirectResponse(
-        f"/ferments/{ferment_id}/batches/{batch_id}?tab=log",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+            continue
+    return None
 
 
-@router.get("/{log_id}/edit")
-def log_edit_page(
-    ferment_id: int,
-    batch_id: int,
-    log_id: int,
-    request,
+def _target_name(db: Session, target_type: str, target_id: int) -> str:
+    try:
+        if target_type == "ferment":
+            obj = db.query(Ferment).filter_by(id=target_id).first()
+            return obj.name if obj else f"Ferment #{target_id}"
+        elif target_type == "batch":
+            obj = db.query(Batch).filter_by(id=target_id).first()
+            return obj.lot_code or f"Batch #{target_id}" if obj else f"Batch #{target_id}"
+        elif target_type == "container":
+            obj = db.query(Container).filter_by(id=target_id).first()
+            return obj.name if obj else f"Container #{target_id}"
+        elif target_type == "tool":
+            obj = db.query(Tool).filter_by(id=target_id).first()
+            return obj.name if obj else f"Tool #{target_id}"
+    except Exception:
+        pass
+    return f"{target_type} #{target_id}"
+
+
+@router.get("", response_class=HTMLResponse)
+def schedules_list(
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_editor),
+    current_user: User = Depends(require_user),
+    target_type: Optional[str] = None,
+    show_inactive: bool = False,
 ):
-    from app.templates import templates
-    from fastapi.responses import HTMLResponse
-    entry = db.query(BatchLog).filter(
-        BatchLog.id == log_id, BatchLog.batch_id == batch_id
-    ).first()
-    if not entry:
-        return RedirectResponse(
-            f"/ferments/{ferment_id}/batches/{batch_id}?tab=log",
-            status_code=status.HTTP_302_FOUND,
-        )
-    batch = db.query(Batch).filter_by(id=batch_id).first()
-    from app.models.ferment import Ferment as FermentModel
-    ferment = db.query(FermentModel).filter_by(id=ferment_id).first()
-    statuses = db.query(Status).order_by(Status.name).all()
-    smell_descriptors  = db.query(SmellDescriptor).order_by(SmellDescriptor.name).all()
-    visual_descriptors = db.query(VisualDescriptor).order_by(VisualDescriptor.name).all()
-    return templates.TemplateResponse(request, "batches/log_edit.html", {
+    query = db.query(Schedule)
+    if not show_inactive:
+        query = query.filter(Schedule.is_active == True)
+    if target_type:
+        query = query.filter(Schedule.target_type == target_type)
+
+    schedules = query.order_by(Schedule.next_due_at.asc().nullslast()).all()
+    now = _now()
+
+    enriched = []
+    for s in schedules:
+        enriched.append({
+            "schedule": s,
+            "target_name": _target_name(db, s.target_type, s.target_id),
+            "is_overdue": s.next_due_at and s.next_due_at < now,
+            "days_until": (s.next_due_at - now).days if s.next_due_at else None,
+        })
+
+    sort_by  = request.query_params.get('sort', 'due')
+    sort_dir = request.query_params.get('dir',  'asc')
+
+    sort_key_map = {
+        "name":   lambda x: x["schedule"].name.lower(),
+        "type":   lambda x: x["schedule"].target_type.lower(),
+        "target": lambda x: x["target_name"].lower(),
+        "due":    lambda x: x["schedule"].next_due_at or datetime(9999,1,1),
+    }
+    key_fn = sort_key_map.get(sort_by, sort_key_map["due"])
+    enriched = sorted(enriched, key=key_fn, reverse=(sort_dir == "desc"))
+
+    return templates.TemplateResponse(request, "schedules/list.html", {
         "current_user": current_user,
-        "ferment": ferment,
-        "batch": batch,
-        "entry": entry,
-        "statuses": statuses,
-        "smell_descriptors": smell_descriptors,
-        "visual_descriptors": visual_descriptors,
+        "enriched": enriched,
+        "now": now,
+        "target_types": TARGET_TYPES,
+        "filters": {"target_type": target_type or "", "show_inactive": show_inactive},
+        "sort": sort_by,
+        "dir": sort_dir,
     })
 
 
-@router.post("/{log_id}/edit")
-def log_edit(
-    ferment_id: int,
-    batch_id: int,
-    log_id: int,
+@router.get("/new", response_class=HTMLResponse)
+def schedules_new(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_editor),
-    logged_at: Optional[str] = Form(None),
-    status_id: Optional[str] = Form(None),
-    ph: Optional[float] = Form(None),
-    temperature: Optional[float] = Form(None),
-    smell_ids: list[int] = Form(default=[]),
-    smell_notes: Optional[str] = Form(None),
-    visual_ids: list[int] = Form(default=[]),
-    visual_notes: Optional[str] = Form(None),
+    target_type: Optional[str] = None,
+    target_id: Optional[int] = None,
+):
+    ferments    = db.query(Ferment).filter(Ferment.archived_at == None).order_by(Ferment.name).all()
+    batches     = db.query(Batch).order_by(Batch.id.desc()).all()
+    containers  = db.query(Container).order_by(Container.name).all()
+    tools       = db.query(Tool).order_by(Tool.name).all()
+
+    return templates.TemplateResponse(request, "schedules/new.html", {
+        "current_user": current_user,
+        "ferments": ferments, "batches": batches,
+        "containers": containers, "tools": tools,
+        "target_types": TARGET_TYPES,
+        "prefill_type": target_type or "",
+        "prefill_id": target_id or "",
+        "today": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+        "errors": {},
+    })
+
+
+@router.post("/new")
+def schedules_create(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    target_type: str = Form(...),
+    target_id: int = Form(...),
+    interval_days: Optional[float] = Form(None),
+    next_due_at: Optional[str] = Form(None),
+):
+    errors = {}
+    if not name.strip():
+        errors["name"] = "Name is required."
+    if target_type not in TARGET_TYPES:
+        errors["target_type"] = "Invalid target type."
+    if errors:
+        return RedirectResponse("/schedules/new", status_code=status.HTTP_303_SEE_OTHER)
+
+    due = _parse_dt(next_due_at) or _now()
+
+    s = Schedule(
+        name=name.strip(),
+        description=description or None,
+        target_type=target_type,
+        target_id=target_id,
+        interval_days=interval_days or None,
+        next_due_at=due,
+        is_active=True,
+    )
+    db.add(s)
+    db.commit()
+    return RedirectResponse("/schedules", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/{schedule_id}/complete")
+def schedule_complete(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+    completed_at: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
 ):
-    entry = db.query(BatchLog).filter(
-        BatchLog.id == log_id, BatchLog.batch_id == batch_id
-    ).first()
-    if not entry:
-        return RedirectResponse(
-            f"/ferments/{ferment_id}/batches/{batch_id}?tab=log",
-            status_code=status.HTTP_302_FOUND,
-        )
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    if not schedule:
+        return RedirectResponse("/schedules", status_code=status.HTTP_302_FOUND)
 
-    def parse_dt(val):
-        if not val:
-            return entry.logged_at
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(val, fmt)
-            except ValueError:
-                continue
-        return entry.logged_at
+    now = _now()
+    # Parse the submitted completion date — Flatpickr sends "Y-m-d H:i" format
+    actual = _parse_dt(completed_at) or now
+    was_late = bool(schedule.next_due_at and actual > schedule.next_due_at)
 
-    sid = None
-    if status_id and status_id.strip():
-        try:
-            sid = int(status_id)
-        except ValueError:
-            sid = None
+    event = ScheduleEvent(
+        schedule_id=schedule_id,
+        due_at=schedule.next_due_at or actual,
+        completed_at=actual,
+        completed_by_id=current_user.id,
+        was_late=was_late,
+        notes=notes or None,
+    )
+    db.add(event)
 
-    smells  = db.query(SmellDescriptor).filter(SmellDescriptor.id.in_(smell_ids)).all() if smell_ids else []
-    visuals = db.query(VisualDescriptor).filter(VisualDescriptor.id.in_(visual_ids)).all() if visual_ids else []
-
-    entry.logged_at          = parse_dt(logged_at)
-    entry.status_id          = sid
-    entry.ph                 = ph
-    entry.temperature        = temperature
-    entry.smell_notes        = smell_notes or None
-    entry.visual_notes       = visual_notes or None
-    entry.notes              = notes or None
-    entry.smell_descriptors  = smells
-    entry.visual_descriptors = visuals
-
-    # Sync batch and ferment status to most recent log's status
-    if sid:
-        batch = db.query(Batch).filter_by(id=batch_id).first()
-        if batch:
-            batch.status_id = sid
-        ferment = db.query(Ferment).filter_by(id=ferment_id).first()
-        if ferment:
-            ferment.status_id = sid
+    # Recalculate next_due_at from the ACTUAL completion date (not now)
+    if schedule.interval_days:
+        schedule.next_due_at = actual + timedelta(days=schedule.interval_days)
+    else:
+        schedule.is_active = False
+        schedule.next_due_at = None
 
     db.commit()
-    return RedirectResponse(
-        f"/ferments/{ferment_id}/batches/{batch_id}?tab=log",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+    return RedirectResponse("/schedules", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.post("/{log_id}/delete")
-def log_delete(
-    ferment_id: int,
-    batch_id: int,
-    log_id: int,
+@router.get("/{schedule_id}/edit", response_class=HTMLResponse)
+def schedules_edit(
+    schedule_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_editor),
 ):
-    entry = db.query(BatchLog).filter(
-        BatchLog.id == log_id, BatchLog.batch_id == batch_id
-    ).first()
-    if entry:
-        db.delete(entry)
-        db.commit()
-    return RedirectResponse(
-        f"/ferments/{ferment_id}/batches/{batch_id}?tab=log",
-        status_code=status.HTTP_303_SEE_OTHER,
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    if not schedule:
+        return RedirectResponse("/schedules", status_code=status.HTTP_302_FOUND)
+
+    ferments   = db.query(Ferment).filter(Ferment.archived_at == None).order_by(Ferment.name).all()
+    batches    = db.query(Batch).order_by(Batch.id.desc()).all()
+    containers = db.query(Container).order_by(Container.name).all()
+    tools      = db.query(Tool).order_by(Tool.name).all()
+
+    return templates.TemplateResponse(request, "schedules/edit.html", {
+        "current_user": current_user,
+        "schedule": schedule,
+        "target_name": _target_name(db, schedule.target_type, schedule.target_id),
+        "ferments": ferments, "batches": batches,
+        "containers": containers, "tools": tools,
+        "target_types": TARGET_TYPES,
+        "errors": {},
+    })
+
+
+@router.post("/{schedule_id}/edit")
+def schedules_update(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    target_type: str = Form(...),
+    target_id: int = Form(...),
+    interval_days: Optional[float] = Form(None),
+    next_due_at: Optional[str] = Form(None),
+    is_active: Optional[str] = Form(None),
+):
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    if not schedule:
+        return RedirectResponse("/schedules", status_code=status.HTTP_302_FOUND)
+
+    schedule.name = name.strip()
+    schedule.description = description or None
+    schedule.target_type = target_type
+    schedule.target_id = target_id
+    schedule.interval_days = interval_days or None
+    schedule.next_due_at = _parse_dt(next_due_at)
+    schedule.is_active = bool(is_active)
+    db.commit()
+    return RedirectResponse("/schedules", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/{schedule_id}", response_class=HTMLResponse)
+def schedule_detail(
+    schedule_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_user),
+):
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    if not schedule:
+        return RedirectResponse("/schedules", status_code=status.HTTP_302_FOUND)
+
+    events = (
+        db.query(ScheduleEvent)
+        .filter_by(schedule_id=schedule_id)
+        .options(joinedload(ScheduleEvent.completed_by_user))
+        .order_by(ScheduleEvent.completed_at.desc())
+        .all()
     )
+
+    return templates.TemplateResponse(request, "schedules/detail.html", {
+        "current_user": current_user,
+        "schedule": schedule,
+        "target_name": _target_name(db, schedule.target_type, schedule.target_id),
+        "events": events,
+        "now": _now(),
+        "today_str": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+    })
+
+
+@router.post("/{schedule_id}/delete")
+def schedules_delete(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    if schedule:
+        db.delete(schedule)
+        db.commit()
+    return RedirectResponse("/schedules", status_code=status.HTTP_303_SEE_OTHER)
