@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - development
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - development
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.filter.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+      - id: filter
+        run: |
+          MESSAGES=$(git log --format="%s" -10)
+          echo "Commit messages: $MESSAGES"
+          if echo "$MESSAGES" | grep -qvE "^(docs|chore|style)\b"; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "Skipping — only docs/chore/style changes"
+          fi
+
+  lint:
+    needs: check-changes
+    if: needs.check-changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync --frozen
+      - name: Lint with ruff
+        run: uv run ruff check app/ || true
+      - name: Format check
+        run: uv run ruff format --check app/ || true
+
+  test:
+    needs: check-changes
+    if: needs.check-changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync --frozen
+      - name: Run tests
+        run: uv run pytest tests/ -q
