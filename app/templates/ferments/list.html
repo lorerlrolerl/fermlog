@@ -76,6 +76,7 @@
         {% if f.status %}
           <span class="badge badge-status-{{ f.status.name | lower | replace(' ', '-') }}">{{ f.status.name }}</span>
         {% else %}—{% endif %}
+        {% if f.batches %}{% set _lb = f.batches|last %}{% if _lb.stage > 1 %}<span class="badge badge-stage" style="margin-left:4px;">S{{ _lb.stage }}</span>{% endif %}{% endif %}
       </td>
       <td class="td-sub td-hide-xs">{{ f.batches | length }}</td>
       <td class="td-sub">{{ f.created_at.strftime("%d %b %Y") if f.created_at else '—' }}</td>

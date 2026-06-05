@@ -44,6 +44,7 @@
   {% endif %}
   {% if ferment.category %}<span class="badge badge-cat">{{ ferment.category.name }}</span>{% endif %}
   {% if ferment.is_ongoing %}<span class="badge badge-ongoing">ongoing</span>{% endif %}
+  {% if batches %}{% set _lb = batches|last %}{% if _lb.stage > 1 %}<span class="badge badge-stage">Stage {{ _lb.stage }}</span>{% endif %}{% endif %}
 </div>
 {% endblock %}
 
@@ -82,7 +83,7 @@
     <div class="batch-body">
       <div class="batch-grid">
         <div><div class="meta-label">Started</div><div class="meta-value">{{ batch.started_at.strftime("%d %b %Y") if batch.started_at else "—" }}</div></div>
-        <div><div class="meta-label">Age</div><div class="meta-value age">{% if batch.started_at %}{{ (now - batch.started_at).days }}<span style="font-size:10px;font-family:monospace;font-weight:400;"> d</span>{% else %}—{% endif %}</div></div>
+        <div><div class="meta-label">Age</div><div class="meta-value age">{% if batch.started_at %}{{ (batch_age_ends[batch.id] - batch.started_at).days }}<span style="font-size:10px;font-family:monospace;font-weight:400;"> d</span>{% else %}—{% endif %}</div></div>
         <div><div class="meta-label">Target Ready</div><div class="meta-value">{{ batch.target_ready_at.strftime("%d %b %Y") if batch.target_ready_at else "—" }}</div></div>
         <div><div class="meta-label">pH target</div><div class="meta-value amber">{{ batch.target_ph if batch.target_ph else "—" }}</div></div>
         <div><div class="meta-label">Ingredients</div><div class="meta-value">{{ batch.ingredients | length }}</div></div>

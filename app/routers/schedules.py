@@ -303,6 +303,63 @@ def schedule_detail(
     })
 
 
+# ── Edit / delete a history event ─────────────────────────────────────────
+
+@router.get("/{schedule_id}/events/{event_id}/edit", response_class=HTMLResponse)
+def schedule_event_edit_form(
+    schedule_id: int,
+    event_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    schedule = db.query(Schedule).filter_by(id=schedule_id).first()
+    event    = db.query(ScheduleEvent).filter_by(id=event_id, schedule_id=schedule_id).first()
+    if not schedule or not event:
+        return RedirectResponse(f"/schedules/{schedule_id}", status_code=status.HTTP_302_FOUND)
+    return templates.TemplateResponse(request, "schedules/event_edit.html", {
+        "current_user": current_user,
+        "schedule": schedule,
+        "event": event,
+        "target_name": _target_name(db, schedule.target_type, schedule.target_id),
+    })
+
+
+@router.post("/{schedule_id}/events/{event_id}/edit")
+def schedule_event_edit(
+    schedule_id: int,
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+    completed_at: Optional[str] = Form(None),
+    due_at: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+):
+    event = db.query(ScheduleEvent).filter_by(id=event_id, schedule_id=schedule_id).first()
+    if not event:
+        return RedirectResponse(f"/schedules/{schedule_id}", status_code=status.HTTP_302_FOUND)
+    event.completed_at = _parse_dt(completed_at)
+    event.due_at       = _parse_dt(due_at) or event.due_at
+    event.notes        = notes or None
+    event.was_late     = bool(event.completed_at and event.due_at and event.completed_at > event.due_at)
+    db.commit()
+    return RedirectResponse(f"/schedules/{schedule_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/{schedule_id}/events/{event_id}/delete")
+def schedule_event_delete(
+    schedule_id: int,
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor),
+):
+    event = db.query(ScheduleEvent).filter_by(id=event_id, schedule_id=schedule_id).first()
+    if event:
+        db.delete(event)
+        db.commit()
+    return RedirectResponse(f"/schedules/{schedule_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
 # ── Delete ─────────────────────────────────────────────────────────────────
 
 @router.post("/{schedule_id}/delete")
