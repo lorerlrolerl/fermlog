@@ -24,6 +24,20 @@ def _get_ferment_or_404(ferment_id: int, db: Session):
     return db.query(Ferment).filter(Ferment.id == ferment_id).first()
 
 
+def _sync_ferment_status(db: Session, ferment_id: int) -> None:
+    """Set ferment.status_id to the status of the latest batch (by started_at)."""
+    latest = (
+        db.query(Batch)
+        .filter(Batch.ferment_id == ferment_id, Batch.status_id.isnot(None))
+        .order_by(Batch.started_at.desc().nullslast(), Batch.batch_number.desc())
+        .first()
+    )
+    if latest:
+        ferment = _get_ferment_or_404(ferment_id, db)
+        if ferment:
+            ferment.status_id = latest.status_id
+
+
 def _get_batch_or_404(batch_id: int, ferment_id: int, db: Session):
     return (
         db.query(Batch)
@@ -132,7 +146,11 @@ def batch_create(
         except ValueError:
             return None
 
-    batch_num = next_batch_number(existing_batches)
+    if parent_batch_id:
+        parent_b = next((b for b in existing_batches if b.id == parent_batch_id), None)
+        batch_num = parent_b.batch_number if parent_b else next_batch_number(existing_batches)
+    else:
+        batch_num = next_batch_number(existing_batches)
     cat_name  = ferment.category.name if ferment.category else None
     started   = parse_date(started_at) or datetime.now(timezone.utc).replace(tzinfo=None)
     final_lot = (
@@ -214,6 +232,16 @@ def batch_detail(
         .all()
     )
 
+    # Age ends when the batch was last logged as non-active; still-active batches use now
+    active_status = db.query(Status).filter(Status.name.ilike("active")).first()
+    active_id = active_status.id if active_status else None
+    age_end = now
+    if batch.status_id != active_id:
+        for log in logs:  # already ordered desc
+            if log.status_id is not None and log.status_id != active_id:
+                age_end = log.logged_at
+                break
+
     active_tab = request.query_params.get("tab", "overview")
 
     ingredients_json = json.dumps([
@@ -244,6 +272,7 @@ def batch_detail(
             "ferment": ferment,
             "batch": batch,
             "now": now,
+            "age_end": age_end,
             "available_ingredients": available_ingredients,
             "available_additives": available_additives,
             "vessel_types": db.query(VesselType).order_by(VesselType.name).all(),
@@ -463,6 +492,8 @@ def batch_edit(
     batch.target_ready_at = parse_date(target_ready_at)
     batch.target_ph = target_ph
     batch.notes = notes or None
+    db.flush()
+    _sync_ferment_status(db, ferment_id)
     db.commit()
 
     return RedirectResponse(

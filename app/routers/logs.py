@@ -7,13 +7,27 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_editor
 from app.database import get_db
-from app.models.ferment import Batch
+from app.models.ferment import Batch, Ferment
 from app.models.log import BatchLog
 from app.models.lookup import SmellDescriptor, Status, VisualDescriptor
 from app.models.user import User
 from app.templates import templates
 
 router = APIRouter(prefix="/ferments/{ferment_id}/batches")
+
+
+def _sync_ferment_status(db: Session, ferment_id: int) -> None:
+    """Set ferment.status_id to the status of the latest batch (by started_at)."""
+    latest = (
+        db.query(Batch)
+        .filter(Batch.ferment_id == ferment_id, Batch.status_id.isnot(None))
+        .order_by(Batch.started_at.desc().nullslast(), Batch.batch_number.desc())
+        .first()
+    )
+    if latest:
+        ferment = db.query(Ferment).filter_by(id=ferment_id).first()
+        if ferment:
+            ferment.status_id = latest.status_id
 
 
 def _parse_dt(val: Optional[str]) -> Optional[datetime]:
@@ -68,6 +82,8 @@ def batch_add_log(
         batch = db.query(Batch).filter_by(id=batch_id).first()
         if batch:
             batch.status_id = status_id
+    db.flush()
+    _sync_ferment_status(db, ferment_id)
     db.commit()
     return RedirectResponse(
         f"/ferments/{ferment_id}/batches/{batch_id}?tab=logs",

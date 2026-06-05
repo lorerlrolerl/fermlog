@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import require_user, require_editor, require_admin
 from app.database import get_db
-from app.lot_code import generate_lot_code, next_batch_number
+from app.lot_code import generate_lot_code
 from app.models.ferment import Batch, Ferment
 from app.models.lookup import Category, Status
 from app.models.user import User
@@ -67,7 +67,7 @@ def ferments_list(
         query = query.filter(Ferment.name.ilike(f"%{q}%"))
 
     from app.models.lookup import Category as CatModel, Status as StatModel
-    from sqlalchemy import func as sqlfunc, outerjoin
+    from sqlalchemy import func as sqlfunc
 
     # Columns that need joins
     if sort_by == "name":
@@ -91,27 +91,65 @@ def ferments_list(
 
     ferments = query.all()
 
-    # Compute active age for each ferment:
-    # days from created_at to last log entry, or to now if still active
     from datetime import datetime as dt
     from app.models.log import BatchLog
+    from app.models.lookup import Status as StatModel
     from sqlalchemy import func as sqlfunc
 
     now = dt.now()
     active_statuses = {"active", "stasis"}
 
+    active_status_row = db.query(StatModel).filter(sqlfunc.lower(StatModel.name) == "active").first()
+    active_id = active_status_row.id if active_status_row else None
+
+    # Bulk log queries — one pass each, keyed by ferment id
+    batch_to_fid = {b.id: f.id for f in ferments for b in f.batches}
+    all_batch_ids = list(batch_to_fid)
+
+    last_log_by_fid: dict = {}
+    deactivated_at_by_fid: dict = {}
+
+    if all_batch_ids:
+        for batch_id, latest in (
+            db.query(BatchLog.batch_id, sqlfunc.max(BatchLog.logged_at).label("l"))
+            .filter(BatchLog.batch_id.in_(all_batch_ids))
+            .group_by(BatchLog.batch_id)
+            .all()
+        ):
+            fid = batch_to_fid[batch_id]
+            if fid not in last_log_by_fid or latest > last_log_by_fid[fid]:
+                last_log_by_fid[fid] = latest
+
+        if active_id is not None:
+            for batch_id, latest in (
+                db.query(BatchLog.batch_id, sqlfunc.max(BatchLog.logged_at).label("l"))
+                .filter(
+                    BatchLog.batch_id.in_(all_batch_ids),
+                    BatchLog.status_id.isnot(None),
+                    BatchLog.status_id != active_id,
+                )
+                .group_by(BatchLog.batch_id)
+                .all()
+            ):
+                fid = batch_to_fid[batch_id]
+                if fid not in deactivated_at_by_fid or latest > deactivated_at_by_fid[fid]:
+                    deactivated_at_by_fid[fid] = latest
+
     ferment_ages = {}
     for f in ferments:
-        batch_ids = [b.id for b in f.batches]
-        last_log_date = None
-        if batch_ids:
-            result = db.query(sqlfunc.max(BatchLog.logged_at))                .filter(BatchLog.batch_id.in_(batch_ids)).scalar()
-            last_log_date = result
+        is_active = bool(f.status and f.status.name.lower() in active_statuses)
+        last_log_date = last_log_by_fid.get(f.id)
 
-        is_active = f.status and f.status.name.lower() in active_statuses
-        end_date = now if is_active else (last_log_date or now)
-        start_date = f.created_at or now
-        age_days = (end_date - start_date).days if end_date >= start_date else 0
+        if is_active:
+            end_date = now
+        else:
+            # End when the status was last logged as non-active; fall back to last log or now
+            end_date = deactivated_at_by_fid.get(f.id) or last_log_date or now
+
+        latest_batch = sorted(f.batches, key=lambda b: b.started_at or dt.min)[-1] if f.batches else None
+        start_date = (latest_batch.started_at if latest_batch and latest_batch.started_at else f.created_at) or now
+        age_days = max((end_date - start_date).days, 0)
+
         ferment_ages[f.id] = {
             "days": age_days,
             "last_log": last_log_date,
@@ -272,6 +310,27 @@ def ferments_detail(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     batches = sorted(ferment.batches, key=lambda b: b.started_at or datetime.min)
 
+    # Compute age_end per batch: date of last non-active status log, or now if still active
+    from app.models.log import BatchLog
+    from sqlalchemy import func as sqlfunc
+    active_status = db.query(Status).filter(Status.name.ilike("active")).first()
+    active_id = active_status.id if active_status else None
+
+    batch_age_ends = {b.id: now for b in batches}
+    inactive_ids = [b.id for b in batches if b.status_id != active_id]
+    if inactive_ids and active_id is not None:
+        for batch_id, latest in (
+            db.query(BatchLog.batch_id, sqlfunc.max(BatchLog.logged_at).label("l"))
+            .filter(
+                BatchLog.batch_id.in_(inactive_ids),
+                BatchLog.status_id.isnot(None),
+                BatchLog.status_id != active_id,
+            )
+            .group_by(BatchLog.batch_id)
+            .all()
+        ):
+            batch_age_ends[batch_id] = latest
+
     return templates.TemplateResponse(
         request,
         "ferments/detail.html",
@@ -280,6 +339,7 @@ def ferments_detail(
             "ferment": ferment,
             "batches": batches,
             "now": now,
+            "batch_age_ends": batch_age_ends,
         },
     )
 

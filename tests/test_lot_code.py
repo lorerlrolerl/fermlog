@@ -60,10 +60,18 @@ def test_next_batch_number_empty():
 
 def test_next_batch_number_sequential():
     class B:
-        def __init__(self, n): self.batch_number = n
+        def __init__(self, n): self.batch_number = n; self.parent_batch_id = None
     assert next_batch_number([B(1), B(2), B(3)]) == 4
 
 def test_next_batch_number_with_gaps():
     class B:
-        def __init__(self, n): self.batch_number = n
+        def __init__(self, n): self.batch_number = n; self.parent_batch_id = None
     assert next_batch_number([B(1), B(3), B(5)]) == 6
+
+def test_next_batch_number_ignores_children():
+    """Stage 2+ children share their parent's batch_number; they must not inflate the count."""
+    class B:
+        def __init__(self, n, parent=None): self.batch_number = n; self.parent_batch_id = parent
+    root  = B(1, parent=None)
+    child = B(1, parent=root)   # same B number, has a parent
+    assert next_batch_number([root, child]) == 2

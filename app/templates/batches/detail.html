@@ -325,7 +325,7 @@
     </div>
     <div class="stat">
       <div class="stat-label">Age</div>
-      <div class="stat-value amber">{% if batch.started_at %}{{ (now - batch.started_at).days }}{% else %}—{% endif %}</div>
+      <div class="stat-value amber">{% if batch.started_at %}{{ (age_end - batch.started_at).days }}{% else %}—{% endif %}</div>
       <div class="stat-sub">days</div>
     </div>
     <div class="stat">

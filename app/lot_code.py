@@ -87,9 +87,12 @@ def generate_lot_code(
 
 def next_batch_number(existing_batches: list) -> int:
     """
-    Given a list of existing Batch objects for a ferment,
-    return the next batch number (max + 1, or 1 if none).
+    Return the next brew-run number for a ferment.
+
+    Only root batches (no parent) count — stage 2+ children of the same brew
+    run share their parent's batch_number, so they must not inflate this count.
     """
-    if not existing_batches:
+    roots = [b for b in existing_batches if not getattr(b, "parent_batch_id", None)]
+    if not roots:
         return 1
-    return max((b.batch_number or 0) for b in existing_batches) + 1
+    return max((b.batch_number or 0) for b in roots) + 1

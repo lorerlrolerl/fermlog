@@ -20,7 +20,7 @@
 
 <form method="post" action="/ferments/{{ ferment.id }}/batches/new">
   <div class="form-section">
-    <div class="form-section-title">Batch · B{{ next_num }}</div>
+    <div class="form-section-title">Batch · B<span id="batch-num-hint">{{ next_num }}</span></div>
     <div class="field-row">
       <div class="field">
         <label for="stage">Stage</label>
@@ -40,13 +40,13 @@
     {% if parent_options %}
     <div class="field">
       <label for="parent_batch_id">Started from batch (optional)</label>
-      <select id="parent_batch_id" name="parent_batch_id">
-        <option value="">— none —</option>
+      <select id="parent_batch_id" name="parent_batch_id" onchange="syncBatchNum()">
+        <option value="" data-bnum="{{ next_num }}">— none —</option>
         {% for pb in parent_options %}
-          <option value="{{ pb.id }}">B{{ pb.batch_number }} · {{ pb.lot_code or 'Stage ' + pb.stage|string }}</option>
+          <option value="{{ pb.id }}" data-bnum="{{ pb.batch_number }}">B{{ pb.batch_number }} · {{ pb.lot_code or 'Stage ' + pb.stage|string }}</option>
         {% endfor %}
       </select>
-      <div class="field-hint">For F2 → F1 traceability.</div>
+      <div class="field-hint">Selecting a parent inherits its brew-run number (B#).</div>
     </div>
     {% endif %}
     <div class="field-row">
@@ -80,4 +80,21 @@
     <a href="/ferments/{{ ferment.id }}" class="btn btn-ghost">cancel</a>
   </div>
 </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function syncBatchNum() {
+    const sel = document.getElementById('parent_batch_id');
+    if (!sel) return;
+    const opt = sel.options[sel.selectedIndex];
+    const bnum = opt ? (opt.dataset.bnum || '{{ next_num }}') : '{{ next_num }}';
+    const hint = document.getElementById('batch-num-hint');
+    if (hint) hint.textContent = bnum;
+    const lotInput = document.getElementById('lot_code');
+    if (lotInput) {
+      lotInput.value = lotInput.value.replace(/-B\d+$/, '-B' + bnum);
+    }
+  }
+</script>
 {% endblock %}

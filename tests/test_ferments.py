@@ -97,6 +97,43 @@ def test_new_batch_increments_number(auth_client, db):
     assert db.query(Batch).filter_by(ferment_id=f.id).count() == 2
 
 
+def test_child_batch_inherits_parent_batch_number(auth_client, db):
+    """S2 child of B1 must keep batch_number=1, not get batch_number=2."""
+    from app.models.ferment import Batch
+    f = make_ferment(db, "Stage Inherit")
+    root = make_batch(db, f.id, lot_code="SI-001", batch_number=1)
+    db.commit()
+
+    resp = auth_client.post(f"/ferments/{f.id}/batches/new", data={
+        "stage": "2",
+        "parent_batch_id": str(root.id),
+        "lot_code": "SI-002",
+        "started_at": "2025-05-20",
+    })
+    assert resp.status_code in (302, 303)
+    child = db.query(Batch).filter_by(ferment_id=f.id, stage=2).first()
+    assert child is not None
+    assert child.batch_number == 1, "child stage must inherit parent's batch_number"
+
+
+def test_independent_second_brew_gets_new_batch_number(auth_client, db):
+    """A new S1 batch with no parent is a fresh brew run — gets batch_number=2."""
+    from app.models.ferment import Batch
+    f = make_ferment(db, "Second Brew")
+    make_batch(db, f.id, lot_code="SB-001", batch_number=1)
+    db.commit()
+
+    resp = auth_client.post(f"/ferments/{f.id}/batches/new", data={
+        "stage": "1",
+        "lot_code": "SB-002",
+        "started_at": "2025-06-01",
+    })
+    assert resp.status_code in (302, 303)
+    new_batch = db.query(Batch).filter_by(ferment_id=f.id, lot_code="SB-002").first()
+    assert new_batch is not None
+    assert new_batch.batch_number == 2, "independent new brew must get batch_number=2"
+
+
 def test_batch_detail_page(auth_client, db):
     f = make_ferment(db, "Batch Detail")
     b = make_batch(db, f.id, lot_code="BD-001")
